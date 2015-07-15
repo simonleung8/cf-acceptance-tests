@@ -272,6 +272,91 @@ EOF
 		})
 	})
 
+	FContext("delete", func() {
+		//index := 0
+		//processType := "web"
+		var webProcess Process
+		BeforeEach(func() {
+			var workerProcess Process
+
+			dropletGuid := stagePackage(packageGuid, "{}")
+			dropletPath := fmt.Sprintf("/v3/droplets/%s", dropletGuid)
+			Eventually(func() *Session {
+				return cf.Cf("curl", dropletPath).Wait(DEFAULT_TIMEOUT)
+			}, CF_PUSH_TIMEOUT).Should(Say("STAGED"))
+
+			appUpdatePath := fmt.Sprintf("/v3/apps/%s/current_droplet", appGuid)
+			appUpdateBody := fmt.Sprintf(`{"droplet_guid":"%s"}`, dropletGuid)
+			Expect(cf.Cf("curl", appUpdatePath, "-X", "PUT", "-d", appUpdateBody).Wait(DEFAULT_TIMEOUT)).To(Exit(0))
+
+			processes := getProcess(appGuid, appName)
+			for _, process := range processes {
+				if process.Type == "web" {
+					webProcess = process
+				} else if process.Type == "worker" {
+					workerProcess = process
+				}
+			}
+			fmt.Println(processes)
+			//_, err := exec.Command("curl", fmt.Sprintf("/v3/processes/%s/scale", webProcess.Guid, processType), "-X", "PUT", "-d", "{'instances': 1}").CombinedOutput()
+			//Expect(err).NotTo(HaveOccurred())
+
+			fmt.Println(webProcess.Name)
+			fmt.Println(workerProcess.Name)
+			fmt.Println(context.RegularUserContext().Space)
+			Expect(cf.Cf("create-route", context.RegularUserContext().Space, helpers.LoadConfig().AppsDomain, "-n", webProcess.Name).Wait(DEFAULT_TIMEOUT)).To(Exit(0))
+			getRoutePath := fmt.Sprintf("/v2/routes?q=host:%s", webProcess.Name)
+			routeBody := cf.Cf("curl", getRoutePath).Wait(DEFAULT_TIMEOUT).Out.Contents()
+			routeJSON := struct {
+				Resources []struct {
+					Metadata struct {
+						Guid string `json:"guid"`
+					} `json:"metadata"`
+				} `json:"resources"`
+			}{}
+			json.Unmarshal([]byte(routeBody), &routeJSON)
+			routeGuid := routeJSON.Resources[0].Metadata.Guid
+			addRoutePath := fmt.Sprintf("/v3/apps/%s/routes", appGuid)
+			addRouteBody := fmt.Sprintf(`{"route_guid":"%s"}`, routeGuid)
+			Expect(cf.Cf("curl", addRoutePath, "-X", "PUT", "-d", addRouteBody).Wait(DEFAULT_TIMEOUT)).To(Exit(0))
+
+			startApp(appGuid)
+
+			Eventually(func() string {
+				return helpers.CurlAppRoot(webProcess.Name)
+			}, DEFAULT_TIMEOUT).Should(ContainSubstring("Hi, I'm Dora!"))
+
+			usageEvents := lastPageUsageEvents(appName)
+
+			event1 := AppUsageEvent{Entity{ProcessType: webProcess.Type, AppGuid: webProcess.Guid, State: "STARTED", ParentAppGuid: appGuid, ParentAppName: appName}}
+			event2 := AppUsageEvent{Entity{ProcessType: workerProcess.Type, AppGuid: workerProcess.Guid, State: "STARTED", ParentAppGuid: appGuid, ParentAppName: appName}}
+			Expect(eventsInclude(usageEvents, event1)).To(BeTrue())
+			Expect(eventsInclude(usageEvents, event2)).To(BeTrue())
+
+			//output := helpers.CurlApp(webProcess.Name, "/env")
+			//Expect(output).To(ContainSubstring(fmt.Sprintf("application_name\\\":\\\"%s", appName)))
+			//Expect(output).To(ContainSubstring(`"foo"=>"bar"`))
+
+			Expect(cf.Cf("apps").Wait(DEFAULT_TIMEOUT)).To(Say(fmt.Sprintf("%s\\s+started", webProcess.Name)))
+			Expect(cf.Cf("apps").Wait(DEFAULT_TIMEOUT)).To(Say(fmt.Sprintf("%s\\s+started", workerProcess.Name)))
+
+		})
+		It("checks that the instance really was terminated and then brought back up by health manager", func() {
+
+			statsUrl := fmt.Sprintf("/v2/apps/%s/stats", webProcess.Guid)
+			statsBody := cf.Cf("curl", statsUrl).Wait(DEFAULT_TIMEOUT).Out.Contents()
+			statsJSON := struct {
+				Instance string `json:"0"` // {
+				//State  string `json:"state"`
+				//Uptime int    `json:"uptime"`
+				//}
+			}{}
+			json.Unmarshal([]byte(statsBody), &statsJSON)
+			fmt.Println(statsJSON)
+		})
+		// DELETE /v3/apps/:guid/processes/(:process_type)/instances/:index
+	})
+
 	XIt("Stages with a user specified admin buildpack", func() {
 		dropletGuid := stagePackage(packageGuid, fmt.Sprintf(`{"buildpack":"%s"}`, buildpackName))
 
